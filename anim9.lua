@@ -40,6 +40,8 @@ local function calc_pose(skeleton, base, p1, p2, position)
 end
 
 local function new(data, anims)
+	if not data.skeleton then return end
+
 	local t = {
 		current_animation = false,
 		current_callback  = false,
