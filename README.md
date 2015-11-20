@@ -8,8 +8,9 @@ Intended for use with [LÖVE3D](https://github.com/excessive/love3d)
 local anim9 = require "anim9"
 local iqm   = require "iqm"
 
-local model = iqm.load("foo.iqm")
-local anims = iqm.load_anims(model)
+local file  = "foo.iqm"
+local model = iqm.load(file)
+local anims = iqm.load_anims(file)
 model.anim  = anim9(anims)
 
 model.anim:play("AnimationName")
