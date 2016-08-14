@@ -3,25 +3,27 @@ local cpml = require "cpml"
 local anim = {
 	_LICENSE     = "anim9 is distributed under the terms of the MIT license. See LICENSE.md.",
 	_URL         = "https://github.com/excessive/anim9",
-	_VERSION     = "0.0.1",
+	_VERSION     = "0.0.3",
 	_DESCRIPTION = "Animation library for LÖVE3D.",
 }
 anim.__index = anim
 
 local function calc_bone_matrix(pos, rot, scale)
-	return cpml.mat4()
-		:translate(pos)
-		:rotate(rot)
-		:scale(scale)
+	local out = cpml.mat4()
+	return out
+		:translate(out, pos)
+		:rotate(out, rot)
+		:scale(out, scale)
 end
 
 local function calc_pose(skeleton, base, p1, p2, position)
 	local animation_buffer = {}
 	local transform = {}
 	for i, joint in ipairs(skeleton) do
-		local t = p1[i].translate:lerp(p2[i].translate, position)
-		local r = p1[i].rotate:slerp(p2[i].rotate, position):normalize()
-		local s = p1[i].scale:lerp(p2[i].scale, position)
+		local t = cpml.vec3():lerp(p1[i].translate, p2[i].translate, position)
+		local r = cpml.quat():slerp(p1[i].rotate, p2[i].rotate, position)
+		local s = cpml.vec3():lerp(p1[i].scale, p2[i].scale, position)
+		r:normalize(r)
 		local m = calc_bone_matrix(t, r, s)
 		local render = cpml.mat4()
 
@@ -46,6 +48,8 @@ local function new(data, anims)
 		current_animation = false,
 		current_callback  = false,
 		current_time      = 0,
+		current_frame     = 1,
+		current_marker    = 0,
 		animations        = {},
 		playing           = false,
 		skeleton          = data.skeleton,
@@ -55,7 +59,7 @@ local function new(data, anims)
 	-- Calculate inverse base pose.
 	for i, bone in ipairs(data.skeleton) do
 		local m = calc_bone_matrix(bone.position, bone.rotation, bone.scale)
-		local inv = m:invert()
+		local inv = cpml.mat4():invert(m)
 
 		if bone.parent > 0 then
 			assert(bone.parent < i)
@@ -84,8 +88,6 @@ function anim:add_animation(animation, frame_data)
 		loop      = animation.loop
 	}
 
-	print(animation.name, animation.first, animation.last)
-
 	for i = animation.first, animation.last do
 		table.insert(anim.frames, frame_data[i])
 	end
@@ -111,6 +113,13 @@ end
 function anim:stop()
 	self:pause()
 	self:reset()
+end
+
+function anim:length(aname)
+	aname = aname or self.current_animation
+	local anim = self.animations[aname]
+	assert(anim, string.format("Invalid animation: \'%s\'", aname))
+	return anim.length / anim.framerate
 end
 
 function anim:step(reverse)
@@ -150,6 +159,7 @@ end
 function anim:update(dt)
 	if self.current_animation and self.playing then
 		local anim = self.animations[self.current_animation]
+		assert(anim, string.format("Invalid animation: %s", self.current_animation))
 		local length = anim.length / anim.framerate
 		self.current_time = self.current_time + dt
 		if self.current_time > length then
@@ -175,6 +185,8 @@ function anim:update(dt)
 			self.skeleton, self.inverse_base,
 			anim.frames[f1+1], anim.frames[f2+1], position
 		)
+
+		self.current_frame = f1
 	end
 end
 
