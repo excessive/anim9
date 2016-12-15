@@ -3,7 +3,7 @@ local cpml = require "cpml"
 local anim = {
 	_LICENSE     = "anim9 is distributed under the terms of the MIT license. See LICENSE.md.",
 	_URL         = "https://github.com/excessive/anim9",
-	_VERSION     = "0.1.0",
+	_VERSION     = "0.1.1",
 	_DESCRIPTION = "Animation library for LÖVE3D.",
 }
 anim.__index = anim
@@ -144,6 +144,13 @@ local function new_animation(name, weight, rate, callback)
 end
 
 function anim:reset(name)
+	if not self.active[name] then
+		for _, v in ipairs(self.active) do
+			self:reset(v.name)
+		end
+		return
+	end
+
 	if not self.active[name] then return end
 	self.active[name].time   = 0
 	self.active[name].marker = 0
@@ -151,19 +158,32 @@ function anim:reset(name)
 end
 
 function anim:play(name, weight, rate, callback)
-	if self.active[name] then return end
+	if self.active[name] then
+		self.active[name].playing = true
+		return
+	end
 	assert(self.animations[name], string.format("Invalid animation: '%s'", name))
 	self.active[name] = new_animation(name, weight, rate, callback)
 	table.insert(self.active, self.active[name])
 end
 
 function anim:pause(name)
-	if not self.active[name] then return end
+	if not self.active[name] then
+		for _, v in ipairs(self.active) do
+			self:pause(v.name)
+		end
+		return
+	end
 	self.active[name].playing = not self.active[name].playing
 end
 
 function anim:stop(name)
-	if not self.active[name] then return end
+	if not self.active[name] then
+		for _, v in ipairs(self.active) do
+			self:stop(v.name)
+		end
+		return
+	end
 	self.active[name] = nil
 	for i, v in ipairs(self.active) do
 		if v.name == name then
@@ -174,7 +194,7 @@ function anim:stop(name)
 end
 
 function anim:length(aname)
-	local _anim = assert(self.animations[_anim], string.format("Invalid animation: \'%s\'", aname))
+	local _anim = assert(self.animations[aname], string.format("Invalid animation: \'%s\'", aname))
 	return _anim.length / _anim.framerate
 end
 
@@ -220,6 +240,7 @@ function anim:update(dt)
 
 	local pose = self.bind_pose
 	for _, meta in ipairs(self.active) do
+		local over = false
 		local _anim = self.animations[meta.name]
 		local length = _anim.length / _anim.framerate
 		meta.time = meta.time + dt * meta.rate
@@ -233,6 +254,9 @@ function anim:update(dt)
 		if _anim.loop then
 			meta.time = cpml.utils.wrap(meta.time, length)
 		else
+			if meta.time > length then
+				over = true
+			end
 			meta.time = math.min(meta.time, length)
 		end
 
@@ -240,6 +264,8 @@ function anim:update(dt)
 		local f1, f2 = math.floor(position), math.ceil(position)
 		position = position - f1
 		f2 = f2 % (_anim.length)
+
+		meta.frame = f1
 
 		-- Update the final pose
 		local interp = mix_poses(
@@ -250,12 +276,15 @@ function anim:update(dt)
 		)
 		local mix = mix_poses(self.skeleton, pose, interp, meta.weight)
 		pose = add_poses(self.skeleton, pose, mix)
+
+		if over then
+			self:stop(meta.name)
+		end
 	end
 
 	self.current_pose, self.current_matrices = update_matrices(
 		self.skeleton, self.inverse_base, pose
 	)
-	self.current_frame = f1
 end
 
 return setmetatable({
