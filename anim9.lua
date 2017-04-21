@@ -3,7 +3,7 @@ local cpml = require "cpml"
 local anim = {
 	_LICENSE     = "anim9 is distributed under the terms of the MIT license. See LICENSE.md.",
 	_URL         = "https://github.com/excessive/anim9",
-	_VERSION     = "0.1.2",
+	_VERSION     = "0.2.0",
 	_DESCRIPTION = "Animation library for LÖVE3D.",
 }
 anim.__index = anim
@@ -28,29 +28,32 @@ local function bind_pose(skeleton)
 	return pose
 end
 
-local function add_poses(skeleton, p1, p2)
-	local new_pose = {}
-	for i = 1, #skeleton do
-		local inv = p1[i].rotate:clone()
-		inv:inverse(inv)
-		new_pose[i] = {
-			translate = p1[i].translate + (p2[i].translate - p1[i].translate),
-			rotate    = (p2[i].rotate * inv) * p1[i].rotate,
-			scale     = p1[i].scale + (p2[i].scale - p1[i].scale)
-		}
+local function is_child(skeleton, bone, which)
+	local next = skeleton[bone]
+	if bone == which then
+		return true
+	elseif next.parent < which then
+		return false
+	else
+		return is_child(skeleton, next.parent, which)
 	end
-	return new_pose
 end
 
-local function mix_poses(skeleton, p1, p2, weight)
+local function mix_poses(skeleton, p1, p2, weight, start)
 	local new_pose = {}
 	for i = 1, #skeleton do
-		local r = cpml.quat():slerp(p1[i].rotate, p2[i].rotate, weight)
-		r:normalize(r)
+		local mix = weight
+		if start > 1 then
+			if not is_child(skeleton, i, start) then
+				mix = 0
+			end
+		end
+		local r = cpml.quat.slerp(p1[i].rotate, p2[i].rotate, mix)
+		r = r:normalize()
 		new_pose[i] = {
-			translate = cpml.vec3():lerp(p1[i].translate, p2[i].translate, weight),
+			translate = cpml.vec3.lerp(p1[i].translate, p2[i].translate, mix),
 			rotate    = r,
-			scale     = cpml.vec3():lerp(p1[i].scale, p2[i].scale, weight)
+			scale     = cpml.vec3.lerp(p1[i].scale, p2[i].scale, mix)
 		}
 	end
 	return new_pose
@@ -85,8 +88,9 @@ local function new(data, anims)
 	if not data.skeleton then return end
 
 	local t = {
-		active       = {},
+		time         = 0,
 		animations   = {},
+		timeline     = {},
 		skeleton     = data.skeleton,
 		inverse_base = {},
 		bind_pose    = bind_pose(data.skeleton)
@@ -115,7 +119,10 @@ local function new(data, anims)
 	return o
 end
 
-function anim:add_animation(animation, frame_data)
+--- Add animation to anim object
+-- @param animation Animation data
+-- @param frames Frame data
+function anim:add_animation(animation, frames)
 	local new_anim = {
 		name      = animation.name,
 		frames    = {},
@@ -125,211 +132,189 @@ function anim:add_animation(animation, frame_data)
 	}
 
 	for i = animation.first, animation.last do
-		table.insert(new_anim.frames, frame_data[i])
+		table.insert(new_anim.frames, frames[i])
 	end
 	self.animations[new_anim.name] = new_anim
 end
 
-local function new_animation(name, weight, rate, callback)
-	return {
+--- Add track to timeline
+-- @param name Name of animation for track -or- track object
+-- @param weight Percentage of total timeline blending being given to track
+-- @param rate Playback rate of animation
+-- @param callback Function to call after non-looping animation ends
+-- @param lock Stops track from being affected by transition
+-- @return table Track object
+function anim:add_track(name, weight, rate, callback, lock)
+	if type(name) == "table" then
+		assert(self.timeline[name] == nil)
+		table.insert(self.timeline, name)
+		self.timeline[name] = name
+		return name
+	end
+
+	assert(self.animations[name])
+	local t = {
 		name     = assert(name),
-		frame    = 1,
-		time     = 0,
-		marker   = 0,
-		rate     = rate or 1,
-		weight   = weight or 1,
+		offset   = self.time,
+		weight   = weight   or 1,
+		rate     = rate     or 1,
 		callback = callback or false,
-		playing  = true,
-		blend    = 1.0
+		lock     = lock     or false,
+		playing  = false,
+		active   = true,
+		blend    = 1,
+		base     = 1
 	}
+	table.insert(self.timeline, t)
+	self.timeline[t] = t
+	return t
 end
 
-function anim:reset(name)
-	if not self.active[name] then
-		for _, v in ipairs(self.active) do
-			self:reset(v.name)
-		end
-		return
-	end
-
-	if not self.active[name] then return end
-	self.active[name].time   = 0
-	self.active[name].marker = 0
-	self.active[name].frame  = 1
-end
-
-function anim:transition(name, time, callback)
-	if self.transitioning and self.transitioning.name == name then
-		return
-	end
-
-	if self.active[name] then
-		return
-	end
-
-	self.transitioning = {
-		name = name,
-		length = time,
-		time = 0
-	}
-
-	self:play(name, 1.0, 1.0, callback)
-	self.active[name].blend = 0.0
-end
-
-function anim:play(name, weight, rate, callback)
-	if self.active[name] then
-		self.active[name].playing = true
-		return
-	end
-	assert(self.animations[name], string.format("Invalid animation: '%s'", name))
-	self.active[name] = new_animation(name, weight, rate, callback)
-	table.insert(self.active, self.active[name])
-end
-
-function anim:pause(name)
-	if not self.active[name] then
-		for _, v in ipairs(self.active) do
-			self:pause(v.name)
-		end
-		return
-	end
-	self.active[name].playing = not self.active[name].playing
-end
-
-function anim:stop(name)
-	if not self.active[name] then
-		for _, v in ipairs(self.active) do
-			self:stop(v.name)
-		end
-		return
-	end
-	self.active[name] = nil
-	for i, v in ipairs(self.active) do
-		if v.name == name then
-			table.remove(self.active, i)
+--- Remove track from timeline
+-- @param _track Track to remove from timeline
+function anim:remove_track(_track)
+	local track = assert(self.timeline[_track])
+	for i = #self.timeline, 1, -1 do
+		if self.timeline[i] == track then
+			table.remove(self.timeline, i)
+			self.timeline[track] = nil
 			break
 		end
 	end
 end
 
-function anim:length(aname)
-	local _anim = assert(self.animations[aname], string.format("Invalid animation: \'%s\'", aname))
+--- Get length of animation
+-- @param name Name of animation
+-- @return number Length of animation (in seconds)
+function anim:length(name)
+	local _anim = assert(self.animations[name], string.format("Invalid animation: \'%s\'", name))
 	return _anim.length / _anim.framerate
 end
 
-function anim:step(name, reverse)
-	assert(self.active[name], string.format("Invalid animation: '%s'", name))
-	local _anim = self.animations[name]
-	local length = _anim.length / _anim.framerate
-	local meta = self.active[name]
-
-	if reverse then
-		meta.time = meta.time - (1/_anim.framerate)
-	else
-		meta.time = meta.time + (1/_anim.framerate)
-	end
-
-	if _anim.loop then
-		if meta.time < 0 then
-			meta.time = meta.time + length
-		end
-		meta.time = cpml.utils.wrap(meta.time, length)
-	else
-		if meta.time < 0 then
-			meta.time = 0
-		end
-		meta.time = math.min(meta.time, length)
-	end
-
-	local position = self.current_time * _anim.framerate
-	local frame = _anim.frames[math.floor(position)+1]
-	meta.frame = frame
-
-	-- Update the final pose
-	local pose = mix_poses(self.skeleton, frame, frame, 0)
-	self.current_pose, self.current_matrices = update_matrices(
-		self.skeleton, self.inverse_base, pose
-	)
-end
-
+--- Update animations
+-- @param dt Delta time
 function anim:update(dt)
-	if #self.active == 0 then
-		return
-	end
+	self.time = self.time + dt
 
+	-- Transition from one animation to the next
 	if self.transitioning then
-		local t = self.transitioning
-		t.time = t.time + dt
-
+		local t        = self.transitioning
+		t.time         = t.time + dt
 		local progress = math.min(t.time / t.length, 1)
 
-		for _, meta in ipairs(self.active) do
-			meta.blend = cpml.utils.lerp(progress, 0, 1)
+		-- fade new animation in
+		t.track.blend  = cpml.utils.lerp(0, 1, progress)
 
-			-- invert the target, so it crossfades.
-			if meta.name ~= t.name then
-				meta.blend = 1.0-meta.blend
+		-- fade old animations out
+		for _, track in ipairs(self.timeline) do
+			if track ~= t.track and not track.lock then
+				track.blend = cpml.utils.lerp(1, 0, progress)
 			end
 		end
 
+		-- remove dead animations
 		if progress == 1 then
-			for _, v in ipairs(self.active) do
-				if v.name ~= t.name then
-					self:stop(v.name)
+			for _, track in ipairs(self.timeline) do
+				if track.blend == 0 and not track.lock then
+					self:remove_track(track)
 				end
 			end
+
 			self.transitioning = nil
 		end
 	end
 
 	local pose = self.bind_pose
-	for _, meta in ipairs(self.active) do
-		local over = false
-		local _anim = self.animations[meta.name]
-		local length = _anim.length / _anim.framerate
-		meta.time = meta.time + dt * meta.rate
-		if meta.time >= length then
-			if type(meta.callback) == "function" then
-				meta.callback(self)
-			end
+	for _, track in ipairs(self.timeline) do
+		if not track.playing then
+			track.offset = track.offset + dt
 		end
 
-		-- If we're not looping, we just want to leave the animation at the end.
+		if not track.active then
+			goto continue
+		end
+
+		local time  = self.time - track.offset
+		local _anim = self.animations[track.name]
+		local frame = time * _anim.framerate
+
 		if _anim.loop then
-			meta.time = cpml.utils.wrap(meta.time, length)
+			frame = frame % _anim.length
 		else
-			if meta.time > length then
-				over = true
+			if frame >= _anim.length then
+				self:remove_track(track)
+				if type(track.callback) == "function" then
+					track.callback(self)
+				end
+				goto continue
 			end
-			meta.time = math.min(meta.time, length)
+			frame = math.min(_anim.length, frame)
 		end
 
-		local position = meta.time * _anim.framerate
-		local f1, f2 = math.floor(position), math.ceil(position)
-		position = position - f1
-		f2 = f2 % (_anim.length)
+		local f1, f2 = math.floor(frame), math.ceil(frame)
 
-		meta.frame = f1
+		-- make sure f2 doesn't exceed anim length or wrongly loop
+		if _anim.loop then
+			f2 = f2 % _anim.length
+		else
+			f2 = math.min(_anim.length, f2)
+		end
 
 		-- Update the final pose
 		local interp = mix_poses(
 			self.skeleton,
 			_anim.frames[f1+1],
 			_anim.frames[f2+1],
-			position
+			frame - f1,
+			track.base
 		)
-		local mix = mix_poses(self.skeleton, pose, interp, meta.weight * meta.blend)
-		pose = add_poses(self.skeleton, pose, mix)
 
-		if over then
-			self:stop(meta.name)
-		end
+		pose = mix_poses(self.skeleton, pose, interp, track.weight * track.blend, track.base)
+
+		::continue::
 	end
-
 	self.current_pose, self.current_matrices = update_matrices(
 		self.skeleton, self.inverse_base, pose
 	)
+end
+
+--- Reset animations
+-- @param clear_locked Flag to clear even locked tracks
+function anim:reset(clear_locked)
+	self.time = 0
+	self.transitioning = nil
+	for i = #self.timeline, 1, -1 do
+		local track = self.timeline[i]
+		if not track.lock or clear_locked then
+			table.remove(self.timeline, i)
+			self.timeline[track] = nil
+		end
+	end
+end
+
+--- Transition from one animation to another
+-- @param track Track object to transition to
+-- @param length Length of transition (in seconds)
+function anim:transition(track, length)
+	assert(track)
+
+	if self.transitioning and self.transitioning.track == track then
+		return
+	end
+
+	if not self.timeline[track] then
+		self:add_track(track)
+	end
+
+	self.transitioning = {
+		track  = track,
+		length = length or 0.2,
+		time   = 0
+	}
+
+	track.offset  = self.time
+	track.playing = true
+	track.active  = true
 end
 
 return setmetatable({
@@ -337,3 +322,15 @@ return setmetatable({
 }, {
 	__call = function(_, ...) return new(...) end
 })
+
+--- @table Track
+-- @field name Name of animation
+-- @field offset Offset from timeline time for track to start play
+-- @field weight Blend weight
+-- @field rate Playback rate of animation
+-- @field callback Function to call after non-looping animation ends
+-- @field lock Stop track from being affected by transitions
+-- @field playing Determine if animation is playing
+-- @field active Toggle influence of track (used for debugging animations)
+-- @field blend Fade in/out during transition
+-- @field base Starting bone to be used
