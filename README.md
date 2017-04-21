@@ -22,10 +22,22 @@ local anims = model.anims
 model.anim  = anim9(anims)
 
 -- play an animation normally
-model.anim:play("AnimationName")
+local anim1 = model.anim:add_track("AnimationName")
+anim1.playing = true
+
+-- prevent transition() from affecting this track
+anim1.lock = true
 
 -- play a second animation on top, mixed in 50% at double speed.
-model.anim:play("AnimationName2", 0.5, 2.0)
+local anim2 = model.anim:add_track("AnimationName2", 0.5, 2.0)
+anim2.playing = true
+
+-- transition unlocked layers to a new anim over 0.2s
+local anim3 = model.anim:add_track("AnimationName3")
+model.anim:transition(anim3, 0.2)
+
+-- disable the second track (useful for debugging)
+anim2.active = false
 
 model.anim:update(dt)
 
