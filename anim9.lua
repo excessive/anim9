@@ -42,6 +42,9 @@ end
 local function mix_poses(skeleton, p1, p2, weight, start)
 	local new_pose = {}
 	for i = 1, #skeleton do
+		if not p1[i] or not p2[i] then
+			goto continue
+		end
 		local mix = weight
 		if start > 1 then
 			if not is_child(skeleton, i, start) then
@@ -55,19 +58,26 @@ local function mix_poses(skeleton, p1, p2, weight, start)
 			rotate    = r,
 			scale     = cpml.vec3.lerp(p1[i].scale, p2[i].scale, mix)
 		}
+		::continue::
 	end
 	return new_pose
 end
 
-local function update_matrices(skeleton, base, pose)
+local function update_matrices(skeleton, base, pose, indices)
 	local animation_buffer = {}
 	local transform = {}
 	local bone_lookup = {}
+	local identity = cpml.mat4()
 
 	for i, joint in ipairs(skeleton) do
-		local m = calc_bone_matrix(pose[i].translate, pose[i].rotate, pose[i].scale)
-		local render
+		local m = identity
+		if pose[i] then
+			m = calc_bone_matrix(pose[i].translate, pose[i].rotate, pose[i].scale)
+		else
+			m = calc_bone_matrix(joint.position, joint.rotation, joint.scale)
+		end
 
+		local render
 		if joint.parent > 0 then
 			assert(joint.parent < i)
 			transform[i] = m * transform[joint.parent]
@@ -78,23 +88,46 @@ local function update_matrices(skeleton, base, pose)
 		end
 
 		bone_lookup[joint.name] = transform[i]
-		table.insert(animation_buffer, render:to_vec4s())
+		animation_buffer[indices[joint.name]] = render:to_vec4s()
 	end
-	table.insert(animation_buffer, animation_buffer[#animation_buffer])
+
 	return animation_buffer, bone_lookup
 end
 
-local function new(data, anims)
+local function new(data, anims, markers)
 	if not data.skeleton then return end
 
 	local t = {
 		time         = 0,
 		animations   = {},
 		timeline     = {},
-		skeleton     = data.skeleton,
+		skeleton     = {},
 		inverse_base = {},
-		bind_pose    = bind_pose(data.skeleton)
+		index_map    = {},
+		bind_pose    = {}
 	}
+
+	local o = setmetatable(t, anim)
+	if anims ~= nil and not anims then
+		return o
+	end
+	o:rebind(data)
+	for _, v in ipairs(anims or data) do
+		if markers then
+			o:add_animation(v, data.frames, markers[v.name])
+		else
+			o:add_animation(v, data.frames)
+		end
+	end
+	return o
+end
+
+function anim:rebind(data)
+	self.skeleton = data.skeleton
+	self.bind_pose = bind_pose(self.skeleton)
+	self.inverse_base = {}
+
+	self.index_map = {}
 
 	-- Calculate inverse base pose.
 	for i, bone in ipairs(data.skeleton) do
@@ -103,32 +136,46 @@ local function new(data, anims)
 
 		if bone.parent > 0 then
 			assert(bone.parent < i)
-			t.inverse_base[i] = t.inverse_base[bone.parent] * inv
+			self.inverse_base[i] = self.inverse_base[bone.parent] * inv
 		else
-			t.inverse_base[i] = inv
+			self.inverse_base[i] = inv
+		end
+
+		self.index_map[i] = i
+		self.index_map[bone.name] = i
+	end
+end
+
+function anim:find_index(bone_name)
+	for i, bone in ipairs(self.skeleton) do
+		if bone.name == bone_name then
+			return i
 		end
 	end
-
-	local o = setmetatable(t, anim)
-	if anims ~= nil and not anims then
-		return o
-	end
-	for _, v in ipairs(anims or data) do
-		o:add_animation(v, data.frames)
-	end
-	return o
+	return 1
 end
 
 --- Add animation to anim object
 -- @param animation Animation data
 -- @param frames Frame data
-function anim:add_animation(animation, frames)
+function anim:add_animation(animation, frames, markers)
+	if animation.frames then
+		for _, v in ipairs(animation) do
+			-- if markers then
+				-- o:add_animation(v, data.frames, markers[v.name])
+			-- else
+				self:add_animation(v, animation.frames)
+		end
+		return
+	end
+
 	local new_anim = {
 		name      = animation.name,
 		frames    = {},
 		length    = animation.last - animation.first,
 		framerate = animation.framerate,
-		loop      = animation.loop
+		loop      = animation.loop,
+		markers   = markers or {}
 	}
 
 	for i = animation.first, animation.last do
@@ -137,47 +184,61 @@ function anim:add_animation(animation, frames)
 	self.animations[new_anim.name] = new_anim
 end
 
---- Add track to timeline
--- @param name Name of animation for track -or- track object
+--- Create a new track
+-- @param name Name of animation for track
 -- @param weight Percentage of total timeline blending being given to track
 -- @param rate Playback rate of animation
 -- @param callback Function to call after non-looping animation ends
 -- @param lock Stops track from being affected by transition
 -- @return table Track object
-function anim:add_track(name, weight, rate, callback, lock)
-	if type(name) == "table" then
-		assert(self.timeline[name] == nil)
-		table.insert(self.timeline, name)
-		self.timeline[name] = name
-		return name
+function anim:new_track(name, weight, rate, callback, lock, early)
+	if not self.animations[name] then
+		return nil
 	end
-
-	assert(self.animations[name])
 	local t = {
 		name     = assert(name),
 		offset   = self.time,
+		time     = self.time,
 		weight   = weight   or 1,
 		rate     = rate     or 1,
 		callback = callback or false,
 		lock     = lock     or false,
+		early    = early    or false,
 		playing  = false,
 		active   = true,
+		frame    = 0,
+		marker   = 0,
 		blend    = 1,
 		base     = 1
 	}
-	table.insert(self.timeline, t)
-	self.timeline[t] = t
 	return t
 end
 
+--- Add track to timeline
+-- @param track Track object to play
+-- @return table Track object
+function anim:play(track)
+	assert(type(track) == "table")
+	assert(self.timeline[track] == nil)
+	track.playing = true
+	track.offset = self.time
+	track.time = self.time
+
+	table.insert(self.timeline, track)
+	self.timeline[track] = track
+	return track
+end
+
 --- Remove track from timeline
--- @param _track Track to remove from timeline
-function anim:remove_track(_track)
-	local track = assert(self.timeline[_track])
+-- @param track Track to remove from timeline (optional). If not specified, removes all.
+function anim:stop(track)
+	if track ~= nil then
+		assert(self.timeline[track])
+	end
 	for i = #self.timeline, 1, -1 do
-		if self.timeline[i] == track then
+		if self.timeline[i] == track or track == nil then
+			self.timeline[self.timeline[i]] = nil
 			table.remove(self.timeline, i)
-			self.timeline[track] = nil
 			break
 		end
 	end
@@ -192,14 +253,18 @@ function anim:length(name)
 end
 
 --- Update animations
--- @param dt Delta time
+-- @param _dt Delta time
 function anim:update(dt)
 	self.time = self.time + dt
+
+	for _, track in ipairs(self.timeline) do
+		track.time = track.time + (dt * track.rate)
+	end
 
 	-- Transition from one animation to the next
 	if self.transitioning then
 		local t        = self.transitioning
-		t.time         = t.time + dt
+		t.time         = t.time + dt * t.track.rate
 		local progress = math.min(t.time / t.length, 1)
 
 		-- fade new animation in
@@ -208,7 +273,7 @@ function anim:update(dt)
 		-- fade old animations out
 		for _, track in ipairs(self.timeline) do
 			if track ~= t.track and not track.lock then
-				track.blend = cpml.utils.lerp(1, 0, progress)
+				track.blend = cpml.utils.lerp(0, 1, 1-progress)
 			end
 		end
 
@@ -216,7 +281,11 @@ function anim:update(dt)
 		if progress == 1 then
 			for _, track in ipairs(self.timeline) do
 				if track.blend == 0 and not track.lock then
-					self:remove_track(track)
+					self:stop(track)
+					-- Call callback on early exit if flagged
+					if track.early and type(track.callback) == "function" then
+						track.callback(self)
+					end
 				end
 			end
 
@@ -234,15 +303,15 @@ function anim:update(dt)
 			goto continue
 		end
 
-		local time  = self.time - track.offset
+		local time  = track.time - track.offset
 		local _anim = self.animations[track.name]
 		local frame = time * _anim.framerate
 
 		if _anim.loop then
 			frame = frame % _anim.length
 		else
-			if frame >= _anim.length then
-				self:remove_track(track)
+			if frame >= _anim.length and not track.lock then
+				self:stop(track)
 				if type(track.callback) == "function" then
 					track.callback(self)
 				end
@@ -251,7 +320,9 @@ function anim:update(dt)
 			frame = math.min(_anim.length, frame)
 		end
 
+		frame = math.max(frame, 0)
 		local f1, f2 = math.floor(frame), math.ceil(frame)
+		track.frame = f1
 
 		-- make sure f2 doesn't exceed anim length or wrongly loop
 		if _anim.loop then
@@ -274,7 +345,7 @@ function anim:update(dt)
 		::continue::
 	end
 	self.current_pose, self.current_matrices = update_matrices(
-		self.skeleton, self.inverse_base, pose
+		self.skeleton, self.inverse_base, pose, self.index_map
 	)
 end
 
@@ -303,7 +374,7 @@ function anim:transition(track, length)
 	end
 
 	if not self.timeline[track] then
-		self:add_track(track)
+		self:play(track)
 	end
 
 	self.transitioning = {
@@ -312,9 +383,19 @@ function anim:transition(track, length)
 		time   = 0
 	}
 
-	track.offset  = self.time
-	track.playing = true
-	track.active  = true
+	track.offset = self.time
+	track.time = self.time
+end
+
+--- Find track in timeline
+-- @param track Track to locate
+-- @return boolean true if found, false if not found
+function anim:find_track(track)
+	if self.timeline[track] then
+		return true
+	end
+
+	return false
 end
 
 return setmetatable({
