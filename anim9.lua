@@ -1,4 +1,9 @@
 local cpml = require "cpml"
+local cpml_mat4  = cpml.mat4
+local cpml_vec3  = cpml.vec3
+local cpml_quat  = cpml.quat
+local cpml_utils = cpml.utils
+
 
 local anim = {
 	_LICENSE     = "anim9 is distributed under the terms of the MIT license. See LICENSE.md.",
@@ -8,13 +13,7 @@ local anim = {
 }
 anim.__index = anim
 
-local function calc_bone_matrix(pos, rot, scale)
-	local out = cpml.mat4()
-	return out
-		:translate(out, pos)
-		:rotate(out, rot)
-		:scale(out, scale)
-end
+local calc_bone_matrix = cpml_mat4.from_transform
 
 local function bind_pose(skeleton)
 	local pose = {}
@@ -51,12 +50,12 @@ local function mix_poses(skeleton, p1, p2, weight, start)
 				mix = 0
 			end
 		end
-		local r = cpml.quat.slerp(p1[i].rotate, p2[i].rotate, mix)
+		local r = cpml_quat.slerp(p1[i].rotate, p2[i].rotate, mix)
 		r = r:normalize()
 		new_pose[i] = {
-			translate = cpml.vec3.lerp(p1[i].translate, p2[i].translate, mix),
+			translate = cpml_vec3.lerp(p1[i].translate, p2[i].translate, mix),
 			rotate    = r,
-			scale     = cpml.vec3.lerp(p1[i].scale, p2[i].scale, mix)
+			scale     = cpml_vec3.lerp(p1[i].scale, p2[i].scale, mix)
 		}
 		::continue::
 	end
@@ -67,7 +66,7 @@ local function update_matrices(skeleton, base, pose, indices)
 	local animation_buffer = {}
 	local transform = {}
 	local bone_lookup = {}
-	local identity = cpml.mat4()
+	local identity = cpml_mat4()
 
 	for i, joint in ipairs(skeleton) do
 		local m = identity
@@ -80,11 +79,11 @@ local function update_matrices(skeleton, base, pose, indices)
 		local render
 		if joint.parent > 0 then
 			assert(joint.parent < i)
-			transform[i] = m * transform[joint.parent]
-			render       = base[i] * transform[i]
+			transform[i] = transform[joint.parent] * m
+			render       = transform[i] * base[i]
 		else
 			transform[i] = m
-			render       = base[i] * m
+			render       = m * base[i]
 		end
 
 		bone_lookup[joint.name] = transform[i]
@@ -132,11 +131,11 @@ function anim:rebind(data)
 	-- Calculate inverse base pose.
 	for i, bone in ipairs(data.skeleton) do
 		local m = calc_bone_matrix(bone.position, bone.rotation, bone.scale)
-		local inv = cpml.mat4():invert(m)
+		local inv = cpml_mat4():invert(m)
 
 		if bone.parent > 0 then
 			assert(bone.parent < i)
-			self.inverse_base[i] = self.inverse_base[bone.parent] * inv
+			self.inverse_base[i] = inv * self.inverse_base[bone.parent]
 		else
 			self.inverse_base[i] = inv
 		end
@@ -268,12 +267,12 @@ function anim:update(dt)
 		local progress = math.min(t.time / t.length, 1)
 
 		-- fade new animation in
-		t.track.blend  = cpml.utils.lerp(0, 1, progress)
+		t.track.blend  = cpml_utils.lerp(0, 1, progress)
 
 		-- fade old animations out
 		for _, track in ipairs(self.timeline) do
 			if track ~= t.track and not track.lock then
-				track.blend = cpml.utils.lerp(0, 1, 1-progress)
+				track.blend = cpml_utils.lerp(0, 1, 1-progress)
 			end
 		end
 
